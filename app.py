@@ -3,118 +3,118 @@ import pandas as pd
 import requests
 import json
 import time
-from google.generativeai import GenerativeModel
 import google.generativeai as genai
 
-# --- UI ---
-st.set_page_config(page_title="BagasseScout: High-Capture Edition", layout="wide")
-st.title("🌱 BagasseScout: High-Capture Lead Engine")
-st.info("This version records every business found to ensure you never get '0 leads'.")
+st.set_page_config(page_title="Lead Debugger", layout="wide")
+st.title("🕵️‍♂️ Lead Engine: Debugger Mode")
+st.write("This version shows exactly what is happening behind the scenes.")
 
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("🔑 API Keys")
-    serper_key = st.text_input("Serper.dev API Key", type="password")
-    firecrawl_key = st.text_input("Firecrawl API Key", type="password")
-    gemini_key = st.text_input("Gemini API Key", type="password")
+    serper_key = st.text_input("Serper.dev Key", type="password")
+    firecrawl_key = st.text_input("Firecrawl Key", type="password")
+    gemini_key = st.text_input("Gemini Key", type="password")
     st.divider()
-    target_market = st.multiselect("Select Markets", ["uk", "de", "fr", "nl"], default=["uk"])
-    limit = st.slider("Results per market", 5, 20, 10)
+    market = st.selectbox("Market", ["uk", "de", "fr", "nl"], index=0)
 
-# --- ENGINE ---
+# --- THE PROCESSORS ---
 
-def get_search_urls(query, country, api_key, num):
-    """Broad search to ensure we find targets."""
+def get_urls(query, country, key):
+    st.write(f"🔎 Searching Google for: `{query}` in `{country}`")
     url = "https://google.serper.dev/search"
-    # We use broader terms: Sugarcane and Biodegradable are more common than 'Bagasse'
-    q = f"{query} wholesale distributor {country.upper()}"
-    payload = json.dumps({"q": q, "gl": country, "num": num})
-    headers = {'X-API-KEY': api_key, 'Content-Type': 'application/json'}
+    payload = json.dumps({"q": query, "gl": country, "num": 5})
+    headers = {'X-API-KEY': key, 'Content-Type': 'application/json'}
     try:
         res = requests.post(url, headers=headers, data=payload)
-        return res.json().get('organic', [])
-    except: return []
+        results = res.json().get('organic', [])
+        st.write(f"✅ Google found {len(results)} links.")
+        return results
+    except Exception as e:
+        st.error(f"Search Failed: {e}")
+        return []
 
-def scrape_content(url, api_key):
-    """Standard scrape with timeout handling."""
+def get_content(url, key):
+    st.write(f"🌐 Scraping: {url}...")
+    # Using the most stable Firecrawl endpoint
+    endpoint = "https://api.firecrawl.dev/v1/scrape"
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    data = {"url": url, "formats": ["markdown"]}
     try:
-        res = requests.post("https://api.firecrawl.dev/v1/scrape", 
-                            json={"url": url, "formats": ["markdown"]},
-                            headers={"Authorization": f"Bearer {api_key}"}, timeout=20)
-        return res.json().get("data", {}).get("markdown", "")
-    except: return None
+        res = requests.post(endpoint, json=data, headers=headers, timeout=30)
+        if res.status_code == 200:
+            content = res.json().get("data", {}).get("markdown", "")
+            if content:
+                st.write(f"📄 Scraped {len(content)} characters of text.")
+                return content
+            else:
+                st.warning("⚠️ Firecrawl returned empty text for this site.")
+        else:
+            st.error(f"❌ Firecrawl Error {res.status_code}: {res.text}")
+    except Exception as e:
+        st.error(f"Scrape Failed: {e}")
+    return None
 
-def analyze_ai(content, url, api_key):
-    """Lenient AI: Categorize instead of Rejecting."""
-    genai.configure(api_key=api_key)
-    model = GenerativeModel('gemini-1.5-flash')
+def ai_analyze(content, url, key):
+    st.write("🤖 AI is analyzing content...")
+    genai.configure(api_key=key)
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    
     prompt = f"""
-    Analyze this website: {url}
-    Content: {content[:5000]}
+    Extract business info from this text: {content[:5000]}
+    URL: {url}
     
-    Task: Is this a business that sells/distributes food packaging? 
-    If yes, extract details. If they are a factory, still extract them but label as 'Manufacturer'.
-    
-    Return JSON:
+    Return ONLY JSON:
     {{
         "company": "Name",
-        "type": "Importer / Wholesaler / Manufacturer / Retailer",
-        "is_importer": true/false,
-        "email": "Email if found",
-        "phone": "Phone if found",
-        "location": "City/Country",
-        "summary": "1-sentence description"
+        "type": "Importer/Distributor/Manufacturer/Other",
+        "is_lead": true,
+        "email": "email",
+        "phone": "phone"
     }}
     """
     try:
         response = model.generate_content(prompt)
-        text = response.text.replace('```json', '').replace('```', '').strip()
-        return json.loads(text)
-    except: return None
+        # Robust JSON cleaning
+        raw_text = response.text.strip()
+        if "```json" in raw_text:
+            raw_text = raw_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in raw_text:
+            raw_text = raw_text.split("```")[1].split("```")[0].strip()
+            
+        data = json.loads(raw_text)
+        return data
+    except Exception as e:
+        st.error(f"AI Analysis Failed: {e}")
+        st.write(f"Raw AI response was: {response.text[:200]}")
+        return None
 
-# --- RUN ---
+# --- RUN BUTTON ---
+search_input = st.text_input("Business Category", "Catering supplies wholesale")
 
-search_input = st.text_input("Search for...", "Sugarcane tableware wholesale")
-
-if st.button("🚀 START CAPTURING LEADS"):
+if st.button("Start Debugging"):
     if not (serper_key and firecrawl_key and gemini_key):
-        st.error("Please enter all API keys!")
+        st.error("Fill in all keys!")
     else:
-        results_list = []
-        for market in target_market:
-            st.write(f"### 📍 Checking {market.upper()} Market...")
-            sites = get_search_urls(search_input, market, serper_key, limit)
+        results_data = []
+        links = get_urls(search_input, market, serper_key)
+        
+        for item in links:
+            url = item['link']
+            text = get_content(url, firecrawl_key)
             
-            if not sites:
-                st.warning(f"Google found no results for {market}. Check your Serper Key.")
-                continue
-
-            for site in sites:
-                url = site['link']
-                st.write(f"Checking: {url}")
-                
-                text = scrape_content(url, firecrawl_key)
-                if text and len(text) > 100:
-                    data = analyze_ai(text, url, gemini_key)
-                    if data:
-                        data['url'] = url
-                        data['market'] = market.upper()
-                        results_list.append(data)
-                        st.success(f"✅ Captured: {data['company']} ({data['type']})")
-                else:
-                    st.write("◽ Skipping: Could not read page text.")
-                time.sleep(1)
-
-        if results_list:
+            if text:
+                analysis = ai_analyze(text, url, gemini_key)
+                if analysis:
+                    analysis['url'] = url
+                    results_data.append(analysis)
+                    st.success(f"✔️ Found: {analysis['company']}")
+            
             st.divider()
-            df = pd.DataFrame(results_list)
-            # Filter: Show Importers at the top
-            df['priority'] = df['is_importer'].apply(lambda x: "⭐ High" if x else "Low")
-            df = df.sort_values('priority', ascending=False)
-            
-            st.subheader("📋 Captured Leads")
-            st.dataframe(df)
-            
-            csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 Download All Leads (CSV)", csv, "leads.csv", "text/csv")
+            time.sleep(1)
+
+        if results_data:
+            st.balloons()
+            st.dataframe(pd.DataFrame(results_data))
         else:
-            st.error("Still 0 leads. Check your Firecrawl credit balance at firecrawl.dev.")
+            st.error("No leads captured. Check the logs above to see which step failed.")

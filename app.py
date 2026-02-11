@@ -3,182 +3,139 @@ import pandas as pd
 import requests
 import json
 import time
-import re
 from google.generativeai import GenerativeModel
 import google.generativeai as genai
 
-# --- PROFESSIONAL UI SETUP ---
-st.set_page_config(page_title="BagasseScout Pro | Lead Engine", layout="wide", page_icon="🚀")
+# --- UI CONFIG ---
+st.set_page_config(page_title="BagasseScout Pro v2", layout="wide", page_icon="🚀")
 
-st.markdown("""
-    <style>
-    .main { background-color: #f0f2f6; }
-    .stProgress > div > div > div > div { background-color: #2e7d32; }
-    .status-box { padding: 10px; border-radius: 5px; margin: 5px 0; border: 1px solid #ccc; }
-    </style>
-    """, unsafe_allow_html=True)
+st.title("🚀 BagasseScout Pro (v2 Engine)")
+st.write("Using Firecrawl v2 + Gemini 1.5 Flash for high-accuracy lead scraping.")
 
-st.title("🚀 BagasseScout Pro: Ultimate Lead Engine")
-st.write("Targeting European Importers & Wholesalers • **Strict No-Manufacturer Filter**")
-
-# --- SIDEBAR CONFIG ---
+# --- SIDEBAR ---
 with st.sidebar:
-    st.header("🔑 API Configuration")
-    SERPER_API = st.text_input("Serper API Key", type="password", help="For Google Search results")
-    FIRECRAWL_API = st.text_input("Firecrawl API Key", type="password", help="To read website content")
-    GEMINI_API = st.text_input("Gemini API Key", type="password", help="The AI Brain")
-    
+    st.header("🔑 API Setup")
+    SERPER_API = st.text_input("Serper.dev API Key", type="password")
+    FIRECRAWL_API = st.text_input("Firecrawl API Key", type="password")
+    GEMINI_API = st.text_input("Gemini API Key", type="password")
     st.divider()
-    st.header("⚙️ Search Settings")
-    country = st.selectbox("Market Region", ["uk", "de", "fr", "nl", "be", "it", "es", "pl"], index=0)
-    search_depth = st.slider("Search Breadth (Results)", 10, 50, 20)
-    
-    st.info("💡 Tip: Use 'uk' for United Kingdom, 'de' for Germany, 'nl' for Netherlands.")
+    target_country = st.selectbox("Market", ["uk", "de", "fr", "nl", "be"], index=0)
+    max_leads = st.slider("Max Leads to Process", 5, 20, 10)
+    st.warning("⚠️ Free Firecrawl accounts: Use a max of 5-10 leads per run to avoid rate limits.")
 
-# --- THE "BRAIN" FUNCTIONS ---
+# --- THE ENGINE ---
 
-def get_search_queries(base_term, country_code):
-    """Generates the best B2B footprints based on the country."""
-    queries = {
-        "uk": [f'"{base_term}" wholesale UK', f'"{base_term}" distributor London', 'eco catering supplies "trade account"'],
-        "de": [f'"{base_term}" Großhandel', 'nachhaltige verpackung Gastronomiebedarf'],
-        "nl": [f'"{base_term}" groothandel', 'duurzame verpakkingen horeca'],
-        "fr": [f'"{base_term}" grossiste', 'emballage biodégradable restauration']
+def scrape_v2(url, api_key):
+    """Uses Firecrawl v2 API with better error reporting."""
+    # Use v2 endpoint which is faster and more reliable
+    endpoint = "https://api.firecrawl.dev/v2/scrape"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
     }
-    # Default to UK style if country not specifically mapped
-    return queries.get(country_code, [f'"{base_term}" wholesale {country_code}'])
-
-def execute_search(query, country_code, api_key):
-    url = "https://google.serper.dev/search"
-    payload = json.dumps({
-        "q": query, 
-        "gl": country_code, 
-        "num": 20,
-        "tbs": "qdr:y" # Focus on results active in the last year
-    })
-    headers = {'X-API-KEY': api_key, 'Content-Type': 'application/json'}
+    # v2 uses 'formats' list instead of old pageOptions
+    data = {
+        "url": url,
+        "formats": ["markdown"],
+        "onlyMainContent": True,
+        "timeout": 30000 
+    }
+    
     try:
-        response = requests.post(url, headers=headers, data=payload)
-        return response.json().get('organic', [])
-    except:
-        return []
+        response = requests.post(endpoint, json=data, headers=headers)
+        
+        if response.status_code == 429:
+            return "ERROR: Rate limit hit. Please wait 60 seconds."
+        elif response.status_code == 401:
+            return "ERROR: Invalid Firecrawl API Key."
+        elif response.status_code == 402:
+            return "ERROR: Out of Firecrawl Credits."
+        
+        result = response.json()
+        if result.get("success"):
+            return result.get("data", {}).get("markdown", "")
+        else:
+            return f"ERROR: {result.get('error', 'Unknown Error')}"
+    except Exception as e:
+        return f"ERROR: Connection failed ({str(e)})"
 
-def scrape_content(url, api_key):
-    endpoint = "https://api.firecrawl.dev/v0/scrape"
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    # Extract only main content to save AI tokens
-    data = {"url": url, "pageOptions": {"onlyMainContent": True, "removeHtml": True}}
-    try:
-        res = requests.post(endpoint, json=data, timeout=15)
-        return res.json().get('data', {}).get('content', "")
-    except:
-        return ""
-
-def qualify_lead_ai(content, url, gemini_key):
+def analyze_lead(content, url, gemini_key):
+    """AI logic remains focused on identifying buyers vs manufacturers."""
     genai.configure(api_key=gemini_key)
     model = GenerativeModel('gemini-1.5-flash')
     
     prompt = f"""
-    You are a professional B2B Sales Scout. Analyze this website content from: {url}
+    Analyze this website content from {url}.
+    Objective: Find WHOLESALERS/IMPORTERS of bagasse (sugarcane) tableware.
     
-    GOAL: Find High-Volume IMPORTERS or WHOLESALERS of disposable tableware (Bagasse, Sugarcane, Pulp).
+    REJECT (is_relevant: false) if:
+    - They are a factory/manufacturer (look for: 'our plant', 'OEM', 'production facility').
     
-    STRICT EXCLUSION:
-    - If they have a 'Factory', 'Production Line', 'R&D Lab', or offer 'OEM manufacturing', set is_relevant to FALSE.
-    - We do NOT want manufacturers. We want people who BUY from manufacturers.
+    ACCEPT (is_relevant: true) if:
+    - They are a 'distributor', 'wholesaler', 'catering supplier', or have a 'wholesale login'.
 
-    POSITIVE SIGNALS (Look for these):
-    - 'Trade account login'
-    - 'Wholesale pricing'
-    - 'Next day delivery UK/Europe'
-    - 'Stockist of eco-brands'
-    - 'Catering supplies distributor'
+    Content: {content[:5000]}
 
-    Content (First 6000 chars): {content[:6000]}
-
-    Respond ONLY with this JSON structure:
+    Return JSON:
     {{
-        "company_name": "Official Name",
+        "company": "Name",
         "is_relevant": true/false,
-        "type": "Importer/Wholesaler/Catering Supplier",
-        "reason": "One sentence explaining why they are a buyer and not a maker",
-        "key_person": "CEO or Purchasing Manager name if visible",
-        "contact_email": "Official email address",
-        "location": "HQ City & Country",
-        "lead_score": 1 to 10
+        "type": "Importer/Wholesaler",
+        "email": "Email if found",
+        "score": 1-10
     }}
     """
     try:
         response = model.generate_content(prompt)
-        # Fix for potential JSON formatting issues from LLM
-        clean_json = response.text.strip().replace('```json', '').replace('```', '')
-        return json.loads(clean_json)
+        text = response.text.replace('```json', '').replace('```', '').strip()
+        return json.loads(text)
     except:
         return None
 
-# --- MAIN INTERFACE ---
+# --- APP FLOW ---
 
-input_query = st.text_input("Search Term (e.g. 'Bagasse Plates' or 'Sugarcane Tableware')", "Bagasse tableware")
+query = st.text_input("Enter Search (e.g., 'Eco packaging wholesale UK')", "Bagasse tableware distributor UK")
 
-if st.button("🚀 START LEAD EXTRACTION"):
+if st.button("Start Extraction"):
     if not (SERPER_API and FIRECRAWL_API and GEMINI_API):
-        st.error("❌ Missing API Keys. Please fill the sidebar.")
+        st.error("Missing API Keys!")
     else:
-        # Step 1: Generate smart queries
-        queries = get_search_queries(input_query, country)
-        st.info(f"🔎 Scanning markets for '{input_query}' in {country.upper()}...")
+        # 1. Search Google
+        search_url = "https://google.serper.dev/search"
+        search_data = json.dumps({"q": query, "gl": target_country, "num": max_leads})
+        search_headers = {'X-API-KEY': SERPER_API, 'Content-Type': 'application/json'}
         
-        all_leads = []
-        visited_urls = set()
-        progress = st.progress(0)
+        st.info("Searching Google...")
+        sites = requests.post(search_url, headers=search_headers, data=search_data).json().get('organic', [])
         
-        # Step 2: Search & Scrape
-        for q_idx, q in enumerate(queries):
-            search_results = execute_search(q, country, SERPER_API)
+        found_leads = []
+        for i, site in enumerate(sites):
+            url = site['link']
+            st.write(f"🔍 Processing ({i+1}/{len(sites)}): {url}")
             
-            for r_idx, result in enumerate(search_results[:search_depth]):
-                url = result['link']
-                if url in visited_urls: continue
-                visited_urls.add(url)
-                
-                with st.status(f"Analyzing {url}...", expanded=False) as status:
-                    # 1. Scrape
-                    raw_text = scrape_content(url, FIRECRAWL_API)
-                    if raw_text:
-                        # 2. AI Qualification
-                        lead_data = qualify_lead_ai(raw_text, url, GEMINI_API)
-                        
-                        if lead_data and lead_data.get('is_relevant'):
-                            lead_data['website'] = url
-                            all_leads.append(lead_data)
-                            st.toast(f"✅ Found: {lead_data['company_name']}")
-                            status.update(label=f"🎯 MATCH: {lead_data['company_name']}", state="complete")
-                        else:
-                            status.update(label="❌ Skipped (Manufacturer or Irrelevant)", state="complete")
-                    else:
-                        status.update(label="⚠️ Could not read site", state="error")
-                
-                # Update progress bar
-                progress.progress(((q_idx * search_depth) + r_idx + 1) / (len(queries) * search_depth))
+            # 2. Scrape with v2
+            content = scrape_v2(url, FIRECRAWL_API)
+            
+            if "ERROR" in content:
+                st.error(f"❌ {url}: {content}")
+                if "Rate limit" in content:
+                    st.warning("Pausing for 10 seconds...")
+                    time.sleep(10) # Wait a bit if rate limited
+                continue
+            
+            # 3. AI Analyze
+            res = analyze_lead(content, url, GEMINI_API)
+            if res and res.get('is_relevant'):
+                res['website'] = url
+                found_leads.append(res)
+                st.success(f"✅ Found Lead: {res['company']}")
+            
+            # Anti-Rate Limit Delay (crucial for free accounts)
+            time.sleep(2) 
 
-        # Step 3: Display & Download
-        if all_leads:
-            st.divider()
-            st.success(f"🎊 Successfully found {len(all_leads)} high-quality leads!")
-            df = pd.DataFrame(all_leads)
-            
-            # Reorder columns for the user
-            cols = ['lead_score', 'company_name', 'type', 'location', 'contact_email', 'key_person', 'website', 'reason']
-            df = df[cols].sort_values(by='lead_score', ascending=False)
-            
-            st.dataframe(df, use_container_width=True)
-            
-            csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="📥 Download Lead Database (CSV)",
-                data=csv,
-                file_name=f"bagasse_importers_{country}.csv",
-                mime="text/csv",
-            )
+        if found_leads:
+            df = pd.DataFrame(found_leads)
+            st.dataframe(df)
+            st.download_button("Download CSV", df.to_csv(index=False), "leads.csv")
         else:
-            st.warning("🧐 No relevant importers found. Try a broader term like 'Catering Supplies Wholesale'.")
+            st.warning("No leads found. Try a broader search term.")

@@ -6,82 +6,91 @@ import time
 from google.generativeai import GenerativeModel
 import google.generativeai as genai
 
-# --- UI CONFIG ---
-st.set_page_config(page_title="BagasseScout Pro v2", layout="wide", page_icon="🚀")
+# --- 1. SETTINGS & UI ---
+st.set_page_config(page_title="BagasseScout Pro: Ultimate Edition", layout="wide", page_icon="🌱")
 
-st.title("🚀 BagasseScout Pro (v2 Engine)")
-st.write("Using Firecrawl v2 + Gemini 1.5 Flash for high-accuracy lead scraping.")
+st.markdown("""
+    <style>
+    .main { background-color: #f8f9fa; }
+    .stButton>button { background-color: #2e7d32; color: white; font-weight: bold; border-radius: 8px; height: 3em; }
+    .stProgress > div > div > div > div { background-color: #2e7d32; }
+    </style>
+    """, unsafe_allow_html=True)
 
-# --- SIDEBAR ---
+st.title("🌱 BagasseScout Pro: All-in-One Lead Engine")
+st.subheader("Targeting UK & European Importers, Wholesalers, and Stockists")
+
+# --- 2. SIDEBAR API SETUP ---
 with st.sidebar:
-    st.header("🔑 API Setup")
-    SERPER_API = st.text_input("Serper.dev API Key", type="password")
-    FIRECRAWL_API = st.text_input("Firecrawl API Key", type="password")
-    GEMINI_API = st.text_input("Gemini API Key", type="password")
-    st.divider()
-    target_country = st.selectbox("Market", ["uk", "de", "fr", "nl", "be"], index=0)
-    max_leads = st.slider("Max Leads to Process", 5, 20, 10)
-    st.warning("⚠️ Free Firecrawl accounts: Use a max of 5-10 leads per run to avoid rate limits.")
-
-# --- THE ENGINE ---
-
-def scrape_v2(url, api_key):
-    """Uses Firecrawl v2 API with better error reporting."""
-    # Use v2 endpoint which is faster and more reliable
-    endpoint = "https://api.firecrawl.dev/v2/scrape"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-    # v2 uses 'formats' list instead of old pageOptions
-    data = {
-        "url": url,
-        "formats": ["markdown"],
-        "onlyMainContent": True,
-        "timeout": 30000 
-    }
+    st.header("🔑 API Configuration")
+    st.markdown("[Get Serper Key](https://serper.dev) | [Get Firecrawl Key](https://firecrawl.dev) | [Get Gemini Key](https://aistudio.google.com/)")
     
-    try:
-        response = requests.post(endpoint, json=data, headers=headers)
-        
-        if response.status_code == 429:
-            return "ERROR: Rate limit hit. Please wait 60 seconds."
-        elif response.status_code == 401:
-            return "ERROR: Invalid Firecrawl API Key."
-        elif response.status_code == 402:
-            return "ERROR: Out of Firecrawl Credits."
-        
-        result = response.json()
-        if result.get("success"):
-            return result.get("data", {}).get("markdown", "")
-        else:
-            return f"ERROR: {result.get('error', 'Unknown Error')}"
-    except Exception as e:
-        return f"ERROR: Connection failed ({str(e)})"
+    serper_key = st.text_input("Serper API Key", type="password")
+    firecrawl_key = st.text_input("Firecrawl API Key", type="password")
+    gemini_key = st.text_input("Gemini API Key", type="password")
+    
+    st.divider()
+    st.header("🌍 Market Target")
+    target_market = st.selectbox("Select Region", ["uk", "de", "fr", "nl", "be", "it", "es"], index=0)
+    search_limit = st.slider("Results to Analyze", 5, 30, 10)
+    st.info("💡 High numbers (20+) may hit free-tier rate limits.")
 
-def analyze_lead(content, url, gemini_key):
-    """AI logic remains focused on identifying buyers vs manufacturers."""
-    genai.configure(api_key=gemini_key)
+# --- 3. THE CORE ENGINE ---
+
+def get_search_results(query, country, api_key):
+    """Fetches high-intent URLs from Google via Serper."""
+    url = "https://google.serper.dev/search"
+    # Adds B2B intent keywords to your search automatically
+    b2b_query = f"{query} wholesale distributor stockist {country.upper()}"
+    payload = json.dumps({"q": b2b_query, "gl": country, "num": search_limit})
+    headers = {'X-API-KEY': api_key, 'Content-Type': 'application/json'}
+    try:
+        response = requests.post(url, headers=headers, data=payload)
+        return response.json().get('organic', [])
+    except Exception as e:
+        st.error(f"Search Error: {str(e)}")
+        return []
+
+def scrape_with_firecrawl(url, api_key):
+    """Extracts clean text from websites using Firecrawl v1."""
+    endpoint = "https://api.firecrawl.dev/v1/scrape"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    data = {"url": url, "formats": ["markdown"], "onlyMainContent": True}
+    try:
+        response = requests.post(endpoint, json=data, headers=headers, timeout=30)
+        if response.status_code == 200:
+            return response.json().get("data", {}).get("markdown", "")
+        elif response.status_code == 429:
+            return "RATE_LIMIT"
+    except:
+        return None
+    return None
+
+def analyze_with_gemini(content, url, api_key):
+    """Uses AI to identify if the company is a buyer/importer."""
+    genai.configure(api_key=api_key)
     model = GenerativeModel('gemini-1.5-flash')
     
     prompt = f"""
-    Analyze this website content from {url}.
-    Objective: Find WHOLESALERS/IMPORTERS of bagasse (sugarcane) tableware.
-    
-    REJECT (is_relevant: false) if:
-    - They are a factory/manufacturer (look for: 'our plant', 'OEM', 'production facility').
-    
-    ACCEPT (is_relevant: true) if:
-    - They are a 'distributor', 'wholesaler', 'catering supplier', or have a 'wholesale login'.
+    Analyze the website content from {url}. 
+    We are looking for BUYERS (Importers, Wholesalers, Catering Suppliers) of Bagasse (Sugarcane) tableware.
 
-    Content: {content[:5000]}
+    RULES:
+    1. ACCEPT (is_relevant: true) if they sell eco-packaging, catering disposables, or have a wholesale/trade section.
+    2. REJECT (is_relevant: false) ONLY if they are a factory in China/India with no European contact info.
+    3. Even if they are an 'Online Shop', they are a potential lead if they carry stock in Europe.
 
-    Return JSON:
+    Content: {content[:7000]}
+
+    Return JSON ONLY:
     {{
         "company": "Name",
-        "is_relevant": true/false,
-        "type": "Importer/Wholesaler",
-        "email": "Email if found",
+        "is_relevant": true,
+        "type": "Wholesaler / Distributor / Brand Owner",
+        "email": "Email if found, else 'Check website'",
+        "phone": "Phone number if found",
+        "location": "HQ City/Country",
+        "reasoning": "1-sentence why they are a good lead",
         "score": 1-10
     }}
     """
@@ -92,50 +101,70 @@ def analyze_lead(content, url, gemini_key):
     except:
         return None
 
-# --- APP FLOW ---
+# --- 4. MAIN EXECUTION ---
 
-query = st.text_input("Enter Search (e.g., 'Eco packaging wholesale UK')", "Bagasse tableware distributor UK")
+user_query = st.text_input("Enter Search (Example: 'Bagasse plates' or 'Sugarcane tableware')", "Bagasse tableware")
 
-if st.button("Start Extraction"):
-    if not (SERPER_API and FIRECRAWL_API and GEMINI_API):
-        st.error("Missing API Keys!")
+if st.button("🚀 EXECUTE LEAD ENGINE"):
+    if not (serper_key and firecrawl_key and gemini_key):
+        st.error("⚠️ Please provide all three API keys in the sidebar.")
     else:
-        # 1. Search Google
-        search_url = "https://google.serper.dev/search"
-        search_data = json.dumps({"q": query, "gl": target_country, "num": max_leads})
-        search_headers = {'X-API-KEY': SERPER_API, 'Content-Type': 'application/json'}
+        st.info(f"🔎 Hunting for importers in {target_market.upper()}...")
         
-        st.info("Searching Google...")
-        sites = requests.post(search_url, headers=search_headers, data=search_data).json().get('organic', [])
+        # 1. Search
+        search_results = get_search_results(user_query, target_market, serper_key)
         
-        found_leads = []
-        for i, site in enumerate(sites):
-            url = site['link']
-            st.write(f"🔍 Processing ({i+1}/{len(sites)}): {url}")
-            
-            # 2. Scrape with v2
-            content = scrape_v2(url, FIRECRAWL_API)
-            
-            if "ERROR" in content:
-                st.error(f"❌ {url}: {content}")
-                if "Rate limit" in content:
-                    st.warning("Pausing for 10 seconds...")
-                    time.sleep(10) # Wait a bit if rate limited
-                continue
-            
-            # 3. AI Analyze
-            res = analyze_lead(content, url, GEMINI_API)
-            if res and res.get('is_relevant'):
-                res['website'] = url
-                found_leads.append(res)
-                st.success(f"✅ Found Lead: {res['company']}")
-            
-            # Anti-Rate Limit Delay (crucial for free accounts)
-            time.sleep(2) 
-
-        if found_leads:
-            df = pd.DataFrame(found_leads)
-            st.dataframe(df)
-            st.download_button("Download CSV", df.to_csv(index=False), "leads.csv")
+        if not search_results:
+            st.warning("No search results found. Check your Serper API Key.")
         else:
-            st.warning("No leads found. Try a broader search term.")
+            final_leads = []
+            progress_bar = st.progress(0)
+            
+            # 2. Loop through sites
+            for i, result in enumerate(search_results):
+                site_url = result['link']
+                st.write(f"🔄 **Analyzing:** {site_url}")
+                
+                # Scrape
+                page_text = scrape_with_firecrawl(site_url, firecrawl_key)
+                
+                if page_text == "RATE_LIMIT":
+                    st.warning("⏸️ Firecrawl Rate Limit reached. Waiting 10s...")
+                    time.sleep(10)
+                    page_text = scrape_with_firecrawl(site_url, firecrawl_key)
+
+                if page_text and len(page_text) > 200:
+                    # AI Analysis
+                    lead_data = analyze_with_gemini(page_text, site_url, gemini_key)
+                    
+                    if lead_data and lead_data.get('is_relevant'):
+                        lead_data['website'] = site_url
+                        final_leads.append(lead_data)
+                        st.success(f"🎯 **Match Found:** {lead_data['company']} ({lead_data['type']})")
+                
+                progress_bar.progress((i + 1) / len(search_results))
+                time.sleep(1.5) # Gentle pacing
+
+            # 3. Display Results
+            if final_leads:
+                st.divider()
+                st.balloons()
+                st.subheader(f"✅ Extracted {len(final_leads)} Qualified Leads")
+                
+                df = pd.DataFrame(final_leads)
+                # Cleanup and reorder
+                cols = ['score', 'company', 'type', 'location', 'email', 'phone', 'website', 'reasoning']
+                df = df[cols].sort_values(by='score', ascending=False)
+                
+                st.dataframe(df, use_container_width=True)
+                
+                # Export to CSV
+                csv_data = df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    "📥 Download Lead List (CSV)", 
+                    csv_data, 
+                    f"bagasse_leads_{target_market}.csv", 
+                    "text/csv"
+                )
+            else:
+                st.warning("Process complete, but no importers were qualified. Try a broader search like 'Catering supplies wholesale'.")

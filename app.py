@@ -5,116 +5,128 @@ import json
 import time
 import google.generativeai as genai
 
-st.set_page_config(page_title="Lead Debugger", layout="wide")
-st.title("🕵️‍♂️ Lead Engine: Debugger Mode")
-st.write("This version shows exactly what is happening behind the scenes.")
+st.set_page_config(page_title="BagasseScout Pro", layout="wide")
+st.title("🌱 BagasseScout: Professional Edition")
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.header("🔑 API Keys")
-    serper_key = st.text_input("Serper.dev Key", type="password")
-    firecrawl_key = st.text_input("Firecrawl Key", type="password")
-    gemini_key = st.text_input("Gemini Key", type="password")
+    st.header("🔑 API Setup")
+    serper_key = st.text_input("Serper API Key", type="password")
+    firecrawl_key = st.text_input("Firecrawl API Key", type="password")
+    gemini_key = st.text_input("Gemini API Key", type="password")
     st.divider()
-    market = st.selectbox("Market", ["uk", "de", "fr", "nl"], index=0)
+    market = st.selectbox("Select Country", ["uk", "de", "fr", "nl"], index=0)
+    search_limit = st.slider("Sites to check", 5, 20, 10)
 
-# --- THE PROCESSORS ---
+# --- THE ENGINE ---
 
-def get_urls(query, country, key):
-    st.write(f"🔎 Searching Google for: `{query}` in `{country}`")
+def get_urls(query, country, key, limit):
     url = "https://google.serper.dev/search"
-    payload = json.dumps({"q": query, "gl": country, "num": 5})
+    # Added B2B keywords directly to search
+    full_query = f"{query} wholesale distributor {country.upper()}"
+    payload = json.dumps({"q": full_query, "gl": country, "num": limit})
     headers = {'X-API-KEY': key, 'Content-Type': 'application/json'}
     try:
         res = requests.post(url, headers=headers, data=payload)
-        results = res.json().get('organic', [])
-        st.write(f"✅ Google found {len(results)} links.")
-        return results
-    except Exception as e:
-        st.error(f"Search Failed: {e}")
-        return []
+        return res.json().get('organic', [])
+    except: return []
 
 def get_content(url, key):
-    st.write(f"🌐 Scraping: {url}...")
-    # Using the most stable Firecrawl endpoint
     endpoint = "https://api.firecrawl.dev/v1/scrape"
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-    data = {"url": url, "formats": ["markdown"]}
+    data = {"url": url, "formats": ["markdown"], "onlyMainContent": True}
     try:
         res = requests.post(endpoint, json=data, headers=headers, timeout=30)
         if res.status_code == 200:
-            content = res.json().get("data", {}).get("markdown", "")
-            if content:
-                st.write(f"📄 Scraped {len(content)} characters of text.")
-                return content
-            else:
-                st.warning("⚠️ Firecrawl returned empty text for this site.")
-        else:
-            st.error(f"❌ Firecrawl Error {res.status_code}: {res.text}")
-    except Exception as e:
-        st.error(f"Scrape Failed: {e}")
+            return res.json().get("data", {}).get("markdown", "")
+    except: return None
     return None
 
 def ai_analyze(content, url, key):
-    st.write("🤖 AI is analyzing content...")
     genai.configure(api_key=key)
-    model = genai.GenerativeModel('gemini-1.5-flash')
     
+    # Try multiple model names to solve the 404 error
+    model_names = ["gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-pro"]
+    
+    success = False
+    model_to_use = None
+    
+    for name in model_names:
+        try:
+            model_to_use = genai.GenerativeModel(name)
+            # Test a tiny prompt to see if model exists
+            model_to_use.generate_content("test")
+            success = True
+            break
+        except:
+            continue
+
+    if not success:
+        return {"error": "Could not connect to any Gemini models. Check your API Key permissions."}
+
     prompt = f"""
-    Extract business info from this text: {content[:5000]}
+    Extract business info from this text: {content[:7000]}
     URL: {url}
     
     Return ONLY JSON:
     {{
         "company": "Name",
-        "type": "Importer/Distributor/Manufacturer/Other",
+        "type": "Importer/Wholesaler/Manufacturer",
         "is_lead": true,
         "email": "email",
-        "phone": "phone"
+        "phone": "phone",
+        "reason": "Why is this a lead?"
     }}
     """
     try:
-        response = model.generate_content(prompt)
-        # Robust JSON cleaning
+        response = model_to_use.generate_content(prompt)
         raw_text = response.text.strip()
         if "```json" in raw_text:
             raw_text = raw_text.split("```json")[1].split("```")[0].strip()
         elif "```" in raw_text:
             raw_text = raw_text.split("```")[1].split("```")[0].strip()
-            
-        data = json.loads(raw_text)
-        return data
+        return json.loads(raw_text)
     except Exception as e:
-        st.error(f"AI Analysis Failed: {e}")
-        st.write(f"Raw AI response was: {response.text[:200]}")
-        return None
+        return {"error": str(e)}
 
-# --- RUN BUTTON ---
-search_input = st.text_input("Business Category", "Catering supplies wholesale")
+# --- EXECUTION ---
 
-if st.button("Start Debugging"):
+search_term = st.text_input("Product Search", "Bagasse tableware")
+
+if st.button("🚀 Start Lead Engine"):
     if not (serper_key and firecrawl_key and gemini_key):
-        st.error("Fill in all keys!")
+        st.error("Missing API Keys!")
     else:
-        results_data = []
-        links = get_urls(search_input, market, serper_key)
+        results = []
+        links = get_urls(search_term, market, serper_key, search_limit)
         
-        for item in links:
-            url = item['link']
-            text = get_content(url, firecrawl_key)
-            
-            if text:
-                analysis = ai_analyze(text, url, gemini_key)
-                if analysis:
-                    analysis['url'] = url
-                    results_data.append(analysis)
-                    st.success(f"✔️ Found: {analysis['company']}")
-            
-            st.divider()
-            time.sleep(1)
-
-        if results_data:
-            st.balloons()
-            st.dataframe(pd.DataFrame(results_data))
+        if not links:
+            st.warning("Google found no results. Check Serper Key.")
         else:
-            st.error("No leads captured. Check the logs above to see which step failed.")
+            progress = st.progress(0)
+            for i, item in enumerate(links):
+                url = item['link']
+                st.write(f"🔍 Analyzing: {url}")
+                
+                text = get_content(url, firecrawl_key)
+                if text:
+                    data = ai_analyze(text, url, gemini_key)
+                    if data and "error" not in data:
+                        if data.get("is_lead"):
+                            data['url'] = url
+                            results.append(data)
+                            st.success(f"✅ Found: {data['company']}")
+                    elif data and "error" in data:
+                        st.error(f"AI Error: {data['error']}")
+                
+                progress.progress((i + 1) / len(links))
+                time.sleep(1)
+
+            if results:
+                st.divider()
+                st.balloons()
+                df = pd.DataFrame(results)
+                st.dataframe(df)
+                st.download_button("Download CSV", df.to_csv(index=False), "leads.csv")
+            else:
+                st.info("No qualified leads found. Try a broader search term.")

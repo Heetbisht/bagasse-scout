@@ -5,8 +5,8 @@ import json
 import time
 import google.generativeai as genai
 
-st.set_page_config(page_title="BagasseScout Pro", layout="wide")
-st.title("🌱 BagasseScout: Professional Edition")
+st.set_page_config(page_title="BagasseScout: Self-Healing Edition", layout="wide")
+st.title("🌱 BagasseScout: Smart Model Discovery")
 
 # --- SIDEBAR ---
 with st.sidebar:
@@ -16,15 +16,13 @@ with st.sidebar:
     gemini_key = st.text_input("Gemini API Key", type="password")
     st.divider()
     market = st.selectbox("Select Country", ["uk", "de", "fr", "nl"], index=0)
-    search_limit = st.slider("Sites to check", 5, 20, 10)
 
 # --- THE ENGINE ---
 
-def get_urls(query, country, key, limit):
+def get_urls(query, country, key):
     url = "https://google.serper.dev/search"
-    # Added B2B keywords directly to search
     full_query = f"{query} wholesale distributor {country.upper()}"
-    payload = json.dumps({"q": full_query, "gl": country, "num": limit})
+    payload = json.dumps({"q": full_query, "gl": country, "num": 10})
     headers = {'X-API-KEY': key, 'Content-Type': 'application/json'}
     try:
         res = requests.post(url, headers=headers, data=payload)
@@ -32,62 +30,51 @@ def get_urls(query, country, key, limit):
     except: return []
 
 def get_content(url, key):
-    endpoint = "https://api.firecrawl.dev/v1/scrape"
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     data = {"url": url, "formats": ["markdown"], "onlyMainContent": True}
     try:
-        res = requests.post(endpoint, json=data, headers=headers, timeout=30)
-        if res.status_code == 200:
-            return res.json().get("data", {}).get("markdown", "")
+        res = requests.post("https://api.firecrawl.dev/v1/scrape", json=data, headers=headers, timeout=30)
+        return res.json().get("data", {}).get("markdown", "")
     except: return None
-    return None
 
 def ai_analyze(content, url, key):
     genai.configure(api_key=key)
     
-    # Try multiple model names to solve the 404 error
-    model_names = ["gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-pro"]
-    
-    success = False
-    model_to_use = None
-    
-    for name in model_names:
-        try:
-            model_to_use = genai.GenerativeModel(name)
-            # Test a tiny prompt to see if model exists
-            model_to_use.generate_content("test")
-            success = True
-            break
-        except:
-            continue
-
-    if not success:
-        return {"error": "Could not connect to any Gemini models. Check your API Key permissions."}
+    # --- AUTO-DISCOVERY LOGIC ---
+    try:
+        # Ask the API which models are available for THIS key
+        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        if not available_models:
+            return {"error": "No generative models found for this API key."}
+        
+        # Pick the best available (Flash is preferred, then Pro)
+        selected_model = next((m for m in available_models if "flash" in m), available_models[0])
+        model = genai.GenerativeModel(selected_model)
+    except Exception as e:
+        return {"error": f"Model Discovery Failed: {str(e)}"}
 
     prompt = f"""
-    Extract business info from this text: {content[:7000]}
-    URL: {url}
-    
+    Website: {url}
+    Content: {content[:7000]}
+    Task: Is this a European wholesaler/importer of bagasse/eco-tableware? 
     Return ONLY JSON:
     {{
         "company": "Name",
+        "is_lead": true/false,
         "type": "Importer/Wholesaler/Manufacturer",
-        "is_lead": true,
-        "email": "email",
-        "phone": "phone",
-        "reason": "Why is this a lead?"
+        "email": "Email if found",
+        "reason": "Short reason"
     }}
     """
     try:
-        response = model_to_use.generate_content(prompt)
+        response = model.generate_content(prompt)
         raw_text = response.text.strip()
-        if "```json" in raw_text:
-            raw_text = raw_text.split("```json")[1].split("```")[0].strip()
-        elif "```" in raw_text:
-            raw_text = raw_text.split("```")[1].split("```")[0].strip()
+        # Clean JSON markdown if present
+        if "```json" in raw_text: raw_text = raw_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in raw_text: raw_text = raw_text.split("```")[1].split("```")[0].strip()
         return json.loads(raw_text)
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": f"AI Parsing Error: {str(e)}"}
 
 # --- EXECUTION ---
 
@@ -98,7 +85,7 @@ if st.button("🚀 Start Lead Engine"):
         st.error("Missing API Keys!")
     else:
         results = []
-        links = get_urls(search_term, market, serper_key, search_limit)
+        links = get_urls(search_term, market, serper_key)
         
         if not links:
             st.warning("Google found no results. Check Serper Key.")
@@ -106,7 +93,7 @@ if st.button("🚀 Start Lead Engine"):
             progress = st.progress(0)
             for i, item in enumerate(links):
                 url = item['link']
-                st.write(f"🔍 Analyzing: {url}")
+                st.write(f"🔎 Analyzing: {url}")
                 
                 text = get_content(url, firecrawl_key)
                 if text:
@@ -129,4 +116,4 @@ if st.button("🚀 Start Lead Engine"):
                 st.dataframe(df)
                 st.download_button("Download CSV", df.to_csv(index=False), "leads.csv")
             else:
-                st.info("No qualified leads found. Try a broader search term.")
+                st.info("No leads found. Broaden your search term.")
